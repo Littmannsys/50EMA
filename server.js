@@ -12,6 +12,7 @@ const TELEGRAM_CHAT_ID   = '6456659526';
 // ─── Deriv WebSocket ──────────────────────────────────────────────────────────
 const API_URL = 'wss://ws.derivws.com/websockets/v3?app_id=1089';
 let ws;
+let isConnecting = false; // guard against multiple simultaneous connection attempts
 
 // ─── In-memory state (replaces DOM) ──────────────────────────────────────────
 const indicatorState = {
@@ -74,10 +75,31 @@ const timeframeMap = { '5min': 300 };
 const MAX_HISTORICAL_CANDLES = 5000;
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
-// No time-based cooldown — gating is handled entirely by the 5-candle cooldown.
-// One touch = one notification, always one message per event.
+// Two-layer duplicate guard:
+//   1. Short 5-second window keyed on exact message text — blocks identical
+//      messages from two server instances running simultaneously (e.g. Railway
+//      deploy overlap), which was causing every notification to appear twice.
+//   2. The 5-candle cooldown inside checkEMATouches controls when the next
+//      legitimate cross notification is allowed.
+const recentMessages = {};
+const DEDUP_WINDOW_MS = 5000; // 5 seconds
+
 async function sendTelegramNotification(message) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+
+  const now = Date.now();
+
+  // Block if this exact message was already sent within the last 5 seconds
+  if (recentMessages[message] && now - recentMessages[message] < DEDUP_WINDOW_MS) {
+    console.log('Duplicate notification blocked:', message.substring(0, 60));
+    return;
+  }
+  recentMessages[message] = now;
+
+  // Clean up old entries so recentMessages does not grow forever
+  Object.keys(recentMessages).forEach(key => {
+    if (now - recentMessages[key] > DEDUP_WINDOW_MS) delete recentMessages[key];
+  });
 
   try {
     const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -149,9 +171,8 @@ function updateEMAValue(symbol, period, value, currentPrice) {
 
 // ─── EMA Cross Detection ──────────────────────────────────────────────────────
 // Fires on every tick. Collects ALL EMA crosses that happen on the same tick
-// and sends exactly ONE combined Telegram message — no matter how many EMAs
-// are crossed simultaneously. After a notification, 5 candles must close
-// before the next one is allowed for that EMA period.
+// and sends exactly ONE combined Telegram message. After a notification, 5
+// candles must close before the next one is allowed for that EMA period.
 function checkEMATouches(symbol, timeframe, currentPrice, ema20, ema50) {
   const symbolName    = displayNames[symbol];
   const timeframeName = displayNames[timeframe];
@@ -363,10 +384,15 @@ function handleMessage(raw) {
 
 // ─── Initialize Deriv WebSocket ───────────────────────────────────────────────
 function initializeWebSocket() {
+  // Prevent multiple simultaneous connection attempts
+  if (isConnecting) return;
+  isConnecting = true;
+
   console.log('Connecting to Deriv WebSocket...');
   ws = new WebSocket(API_URL);
 
   ws.on('open', () => {
+    isConnecting = false;
     console.log('Connected to Deriv WebSocket');
     ['R_10', 'R_25', 'stpRNG'].forEach(symbol => {
       requestCandles(symbol, '5min');
@@ -377,11 +403,13 @@ function initializeWebSocket() {
   ws.on('message', handleMessage);
 
   ws.on('close', () => {
+    isConnecting = false;
     console.log('Disconnected — reconnecting in 5s...');
     setTimeout(initializeWebSocket, 5000);
   });
 
   ws.on('error', err => {
+    isConnecting = false;
     console.error('WebSocket error:', err.message);
   });
 }
