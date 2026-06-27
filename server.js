@@ -74,16 +74,10 @@ const timeframeMap = { '5min': 300 };
 const MAX_HISTORICAL_CANDLES = 5000;
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
-const notificationCooldown = 30000;
-const lastNotificationTime = {};
-
+// No time-based cooldown here — notification gating is handled entirely
+// by the 5-candle cooldown inside checkEMATouches. One touch = one notification.
 async function sendTelegramNotification(message) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-
-  const key = message.substring(0, 100);
-  const now = Date.now();
-  if (now - (lastNotificationTime[key] || 0) < notificationCooldown) return;
-  lastNotificationTime[key] = now;
 
   try {
     const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -154,8 +148,8 @@ function updateEMAValue(symbol, period, value, currentPrice) {
 }
 
 // ─── EMA Cross Detection ──────────────────────────────────────────────────────
-// Check if price just crossed an EMA on this tick — fires immediately, no candle close needed.
-// Cooldown: 5 candles must have closed since the last notification for that EMA.
+// Fires on every tick. Sends exactly 1 notification per cross.
+// After a notification, 5 candles must close before the next one is allowed.
 function checkEMATouches(symbol, timeframe, currentPrice, ema20, ema50) {
   const symbolName    = displayNames[symbol];
   const timeframeName = displayNames[timeframe];
@@ -180,9 +174,11 @@ function checkEMATouches(symbol, timeframe, currentPrice, ema20, ema50) {
     const state     = emaNotificationState[symbol][period];
     const lastNotif = state.lastNotifCandle;
 
-    // Enforce 5-candle cooldown
+    // Enforce 5-candle cooldown — if fewer than 5 candles have closed
+    // since the last notification, skip this cross silently
     if (lastNotif !== null && currentCount - lastNotif < 5) return;
 
+    // Cross confirmed and cooldown passed — send exactly 1 notification
     const crossedUp = currentSide === 'above';
     const emoji     = crossedUp ? '📈' : '📉';
     const direction = crossedUp ? 'crossed above' : 'crossed below';
@@ -191,11 +187,11 @@ function checkEMATouches(symbol, timeframe, currentPrice, ema20, ema50) {
       `EMA: ${ema.toFixed(4)} | Price: ${currentPrice.toFixed(4)}`;
 
     sendTelegramNotification(message);
+
+    // Record the candle count at which this notification was sent
     state.lastNotifCandle = currentCount;
   });
 }
-
-
 
 // ─── Candle Management ────────────────────────────────────────────────────────
 function getCandleTimeframe(timestamp, granularity) {
@@ -247,7 +243,6 @@ function recalculateIndicators(symbol, livePrice) {
 
   Object.keys(timeframeMap).forEach(timeframe => {
     checkEMATouches(symbol, timeframe, livePrice, ema20, ema50);
-
   });
 }
 
@@ -296,12 +291,12 @@ function requestCandles(symbol, timeframe) {
   const start       = end - (MAX_HISTORICAL_CANDLES * granularity);
 
   sendMessage({
-    ticks_history:    symbol,
+    ticks_history:     symbol,
     adjust_start_time: 1,
-    count:            MAX_HISTORICAL_CANDLES,
-    end:              'latest',
+    count:             MAX_HISTORICAL_CANDLES,
+    end:               'latest',
     start,
-    style:            'candles',
+    style:             'candles',
     granularity
   });
 }
