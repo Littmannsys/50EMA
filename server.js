@@ -74,8 +74,8 @@ const timeframeMap = { '5min': 300 };
 const MAX_HISTORICAL_CANDLES = 5000;
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
-// No time-based cooldown here — notification gating is handled entirely
-// by the 5-candle cooldown inside checkEMATouches. One touch = one notification.
+// No time-based cooldown — gating is handled entirely by the 5-candle cooldown.
+// One touch = one notification, always one message per event.
 async function sendTelegramNotification(message) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
 
@@ -148,12 +148,17 @@ function updateEMAValue(symbol, period, value, currentPrice) {
 }
 
 // ─── EMA Cross Detection ──────────────────────────────────────────────────────
-// Fires on every tick. Sends exactly 1 notification per cross.
-// After a notification, 5 candles must close before the next one is allowed.
+// Fires on every tick. Collects ALL EMA crosses that happen on the same tick
+// and sends exactly ONE combined Telegram message — no matter how many EMAs
+// are crossed simultaneously. After a notification, 5 candles must close
+// before the next one is allowed for that EMA period.
 function checkEMATouches(symbol, timeframe, currentPrice, ema20, ema50) {
   const symbolName    = displayNames[symbol];
   const timeframeName = displayNames[timeframe];
   const currentCount  = candleCount[symbol][timeframe];
+
+  // Collect all EMA crosses that qualify this tick
+  const crossedEMAs = [];
 
   [20, 50].forEach(period => {
     const ema = period === 20 ? ema20 : ema50;
@@ -174,21 +179,35 @@ function checkEMATouches(symbol, timeframe, currentPrice, ema20, ema50) {
     const state     = emaNotificationState[symbol][period];
     const lastNotif = state.lastNotifCandle;
 
-    // Enforce 5-candle cooldown — if fewer than 5 candles have closed
-    // since the last notification, skip this cross silently
+    // Enforce 5-candle cooldown
     if (lastNotif !== null && currentCount - lastNotif < 5) return;
 
-    // Cross confirmed and cooldown passed — send exactly 1 notification
-    const crossedUp = currentSide === 'above';
+    // This EMA qualifies — add to list
+    crossedEMAs.push({ period, ema, crossedUp: currentSide === 'above', state });
+  });
+
+  // Nothing crossed — do nothing
+  if (crossedEMAs.length === 0) return;
+
+  // Build ONE message covering all crossed EMAs this tick
+  const lines = crossedEMAs.map(({ period, ema, crossedUp }) => {
     const emoji     = crossedUp ? '📈' : '📉';
     const direction = crossedUp ? 'crossed above' : 'crossed below';
-    const message =
-      `${emoji} *EMA TOUCH*: *${symbolName}* price ${direction} *${period} EMA* on *${timeframeName}*\n` +
-      `EMA: ${ema.toFixed(4)} | Price: ${currentPrice.toFixed(4)}`;
+    return (
+      `${emoji} *${period} EMA*: price ${direction}\n` +
+      `EMA: ${ema.toFixed(4)} | Price: ${currentPrice.toFixed(4)}`
+    );
+  });
 
-    sendTelegramNotification(message);
+  const message =
+    `*EMA TOUCH* — *${symbolName}* on *${timeframeName}*\n\n` +
+    lines.join('\n\n');
 
-    // Record the candle count at which this notification was sent
+  // Send the single combined notification
+  sendTelegramNotification(message);
+
+  // Update cooldown state for every EMA that was crossed
+  crossedEMAs.forEach(({ state }) => {
     state.lastNotifCandle = currentCount;
   });
 }
@@ -265,6 +284,10 @@ function processCandles(symbol, timeframe, candles) {
 
   const lastCandle = data[data.length - 1];
   currentCandles[symbol][timeframe] = { ...lastCandle };
+
+  // Reset price side tracking so no false cross fires on first live tick
+  emaPriceSide[symbol][20] = null;
+  emaPriceSide[symbol][50] = null;
 
   // Seed EMA state from all historical CLOSED candles (one-time at startup)
   emaState[symbol][20] = initEMA(historicalData[symbol][timeframe], 20);
