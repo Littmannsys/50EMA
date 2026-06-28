@@ -175,16 +175,18 @@ function getEMA(symbol, period) {
 
 // ─── EMA cross detection ──────────────────────────────────────────────────────
 
-function checkEMATouches(symbol, timeframe, currentPrice, ema20, ema50) {
+function checkEMATouches(symbol, timeframe, currentPrice) {
   const symbolName    = displayNames[symbol]    || symbol;
   const timeframeName = displayNames[timeframe] || timeframe;
   const currentCount  = candleCount[symbol][timeframe];
 
   [20, 50].forEach(period => {
-    const ema = period === 20 ? ema20 : ema50;
+    // Use the CLOSED-BAR EMA — this never moves mid-candle.
+    // Comparing price against a stable line is the only way to get exactly
+    // one cross event per genuine price crossover.
+    const ema = getEMA(symbol, period);
     if (ema === null) return;
 
-    // FIX Bug 2 & 3 — use per-timeframe state
     const state = emaNotificationState[symbol][timeframe][period];
 
     // Unlock cooldown after 5 closed candles
@@ -197,12 +199,13 @@ function checkEMATouches(symbol, timeframe, currentPrice, ema20, ema50) {
     const currentSide  = currentPrice >= ema ? 'above' : 'below';
     const previousSide = emaPriceSide[symbol][timeframe][period];
 
+    // Always update side BEFORE checking for cross
     emaPriceSide[symbol][timeframe][period] = currentSide;
 
-    if (previousSide === null) return;     // first tick — no prior side to compare
-    if (previousSide === currentSide) return; // no cross, nothing to do
+    if (previousSide === null) return;        // first tick — nothing to compare yet
+    if (previousSide === currentSide) return; // no cross
 
-    // Genuine cross detected
+    // Price has crossed the stable EMA line — fire exactly once
     const crossedUp = currentSide === 'above';
     const emoji     = crossedUp ? '📈' : '📉';
     const message   =
@@ -297,7 +300,7 @@ function recalculateIndicators(symbol, timeframe, livePrice) {
     `EMA50: ${ema50Display !== null ? ema50Display.toFixed(4) : 'N/A'} (${trend50} ${dist50})   `
   );
 
-  checkEMATouches(symbol, timeframe, livePrice, ema20Live, ema50Live);
+  checkEMATouches(symbol, timeframe, livePrice);
 }
 
 // ─── Historical candle processing ─────────────────────────────────────────────
