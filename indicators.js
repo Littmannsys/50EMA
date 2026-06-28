@@ -55,7 +55,6 @@ SYMBOLS.forEach(sym => {
     currentCandles[sym][tf] = null;
     candleCount[sym][tf]    = 0;
 
-    // FIX Bug 2 & 3 — scope notification state AND price side per timeframe
     emaNotificationState[sym][tf] = {};
     emaPriceSide[sym][tf]         = {};
 
@@ -76,7 +75,6 @@ SYMBOLS.forEach(sym => {
 const alertSentAt = new Map();
 
 // Dedup processed ticks — key: `${symbol}:${epoch}` prevents same tick firing twice
-// (can happen on reconnect when old + new socket both deliver the same message)
 const processedTicks = new Map();
 
 async function sendTelegramNotification(message, dedupKey) {
@@ -116,11 +114,6 @@ async function sendTelegramNotification(message, dedupKey) {
 
 // ─── EMA helpers ──────────────────────────────────────────────────────────────
 
-/**
- * Seed EMA from all closed historical candles (SMA cold-start, then recursive).
- * Stores the result in emaState[symbol][period] — represents the EMA at the
- * close of the LAST completed bar.
- */
 function initEMA(symbol, closedCandles, period) {
   const data = closedCandles
     .filter(c => isFinite(c.close) && c.close > 0)
@@ -131,12 +124,10 @@ function initEMA(symbol, closedCandles, period) {
     return;
   }
 
-  // SMA seed over first `period` bars
   let ema = 0;
   for (let i = 0; i < period; i++) ema += data[i].close;
   ema /= period;
 
-  // Walk forward through the rest
   const k = 2 / (period + 1);
   for (let i = period; i < data.length; i++) {
     ema = data[i].close * k + ema * (1 - k);
@@ -145,27 +136,12 @@ function initEMA(symbol, closedCandles, period) {
   emaState[symbol][period] = ema;
 }
 
-/**
- * Advance stored EMA when a bar closes.
- * This keeps emaState always = EMA at the close of the last COMPLETED bar.
- */
 function advanceEMA(symbol, period, closedClose) {
   if (emaState[symbol][period] === null) return;
   const k = 2 / (period + 1);
   emaState[symbol][period] = closedClose * k + emaState[symbol][period] * (1 - k);
 }
 
-/**
- * FIX Bug 1 — Return the stored EMA of the last CLOSED bar directly.
- *
- * The previous version applied the EMA formula to the live price on every tick:
- *   return currentPrice * k + stored * (1 - k)
- * That made the EMA chase the price aggressively, causing false crosses.
- *
- * Correct behaviour: the EMA value on the forming bar stays fixed at the last
- * closed bar's EMA. It only advances when a bar actually closes.
- * This matches TradingView's and most charting libraries' behaviour.
- */
 function getLiveEMA(symbol, period, currentPrice) {
   const stored = emaState[symbol][period];
   if (stored === null) return null;
@@ -185,29 +161,26 @@ function checkEMATouches(symbol, timeframe, currentPrice) {
   const currentCount  = candleCount[symbol][timeframe];
 
   [20, 50].forEach(period => {
-    // Use the CLOSED-BAR EMA — this never moves mid-candle.
-    // Comparing price against a stable line is the only way to get exactly
-    // one cross event per genuine price crossover.
     const ema = getEMA(symbol, period);
     if (ema === null) return;
 
     const state = emaNotificationState[symbol][timeframe][period];
 
-    // Unlock cooldown after 5 closed candles
+    // 1. ALWAYS track the price side, even during cooldown
+    const currentSide  = currentPrice >= ema ? 'above' : 'below';
+    const previousSide = emaPriceSide[symbol][timeframe][period];
+    
+    emaPriceSide[symbol][timeframe][period] = currentSide;
+
+    // 2. Unlock cooldown after 5 closed candles
     if (state.notifSent && currentCount - state.lastNotifCandle >= 5) {
       state.notifSent = false;
     }
 
+    // 3. Check cooldown and crossover AFTER updating the side
     if (state.notifSent) return;
-
-    const currentSide  = currentPrice >= ema ? 'above' : 'below';
-    const previousSide = emaPriceSide[symbol][timeframe][period];
-
-    // Always update side BEFORE checking for cross
-    emaPriceSide[symbol][timeframe][period] = currentSide;
-
-    if (previousSide === null) return;        // first tick — nothing to compare yet
-    if (previousSide === currentSide) return; // no cross
+    if (previousSide === null) return;        
+    if (previousSide === currentSide) return; // No cross occurred
 
     // Price has crossed the stable EMA line — fire exactly once
     const crossedUp = currentSide === 'above';
@@ -216,9 +189,6 @@ function checkEMATouches(symbol, timeframe, currentPrice) {
       `${emoji} *${period} EMA ${symbolName} on ${timeframeName}* : price Touch\n` +
       `EMA: ${ema.toFixed(4)} | Price: ${currentPrice.toFixed(4)}`;
 
-    // CRITICAL: set the lock SYNCHRONOUSLY before the async send.
-    // If we set it after, two ticks arriving before the Promise resolves
-    // both pass the guard and fire duplicate Telegram messages.
     state.lastNotifCandle = currentCount;
     state.notifSent       = true;
 
@@ -238,20 +208,21 @@ function updateCurrentCandle(symbol, price, timestamp) {
   Object.keys(timeframeMap).forEach(timeframe => {
     const granularity = timeframeMap[timeframe];
     const candleTime  = getCandleTimeframe(timestamp, granularity);
+    const currentCandle = currentCandles[symbol][timeframe];
 
-    if (
-      !currentCandles[symbol][timeframe] ||
-      currentCandles[symbol][timeframe].timestamp !== candleTime
-    ) {
+    // FIX: Ignore older out-of-order ticks that would drag the candle backwards
+    if (currentCandle && candleTime < currentCandle.timestamp) return;
+
+    if (!currentCandle || currentCandle.timestamp !== candleTime) {
       // Previous candle just closed — archive it and advance EMA
-      if (currentCandles[symbol][timeframe]) {
-        historicalData[symbol][timeframe].push(currentCandles[symbol][timeframe]);
+      if (currentCandle) {
+        historicalData[symbol][timeframe].push(currentCandle);
 
         if (historicalData[symbol][timeframe].length > MAX_HISTORICAL_CANDLES) {
           historicalData[symbol][timeframe].shift();
         }
 
-        const closedClose = currentCandles[symbol][timeframe].close;
+        const closedClose = currentCandle.close;
         advanceEMA(symbol, 20, closedClose);
         advanceEMA(symbol, 50, closedClose);
         candleCount[symbol][timeframe]++;
@@ -272,10 +243,9 @@ function updateCurrentCandle(symbol, price, timestamp) {
         close: price
       };
     } else {
-      const candle = currentCandles[symbol][timeframe];
-      candle.high  = Math.max(candle.high, price);
-      candle.low   = Math.min(candle.low,  price);
-      candle.close = price;
+      currentCandle.high  = Math.max(currentCandle.high, price);
+      currentCandle.low   = Math.min(currentCandle.low,  price);
+      currentCandle.close = price;
     }
   });
 }
@@ -288,13 +258,8 @@ function recalculateIndicators(symbol, timeframe, livePrice) {
 
   if (!historicalCandles || historicalCandles.length === 0 || !currentCandle) return;
 
-  // Display: use closed-bar EMA (stable value for the forming candle)
   const ema20Display = getEMA(symbol, 20);
   const ema50Display = getEMA(symbol, 50);
-
-  // Detection: use live EMA (price-stepped) so crosses within the forming candle are caught
-  const ema20Live = getLiveEMA(symbol, 20, livePrice);
-  const ema50Live = getLiveEMA(symbol, 50, livePrice);
 
   const trend20  = ema20Display !== null ? (livePrice > ema20Display ? 'Uptrend' : 'Downtrend') : 'N/A';
   const trend50  = ema50Display !== null ? (livePrice > ema50Display ? 'Uptrend' : 'Downtrend') : 'N/A';
@@ -326,7 +291,6 @@ function processCandles(symbol, timeframe, candles) {
 
   if (data.length === 0) return;
 
-  // All bars except the last are treated as closed; the last is still forming
   historicalData[symbol][timeframe] = data.slice(0, -1);
 
   const lastCandle = data[data.length - 1];
@@ -338,13 +302,9 @@ function processCandles(symbol, timeframe, candles) {
     close: lastCandle.close
   };
 
-  // Seed EMA from all closed bars
   initEMA(symbol, historicalData[symbol][timeframe], 20);
   initEMA(symbol, historicalData[symbol][timeframe], 50);
 
-  // Reset emaPriceSide so the first tick after (re)load doesn't trigger a false cross.
-  // We set it to the current side based on the last candle close vs seeded EMA,
-  // so there is NO sudden side-change on first tick.
   ;[20, 50].forEach(period => {
     const ema = emaState[symbol][period];
     const lastClose = historicalData[symbol][timeframe].length > 0
@@ -414,11 +374,9 @@ function handleMessage(raw) {
     const price     = parseFloat(data.tick.quote);
     const timestamp = data.tick.epoch;
 
-    // Drop duplicate ticks (same symbol + epoch) — happens on reconnect
     const tickKey = `${symbol}:${timestamp}`;
     if (processedTicks.has(tickKey)) return;
     processedTicks.set(tickKey, Date.now());
-    // Prune old entries (keep last 60 seconds)
     const cutoff = Date.now() - 60_000;
     processedTicks.forEach((t, k) => { if (t < cutoff) processedTicks.delete(k); });
 
