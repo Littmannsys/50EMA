@@ -1,12 +1,15 @@
 {
-  "name": "indicators-app",
+  "name": "deriv-ema-indicators",
   "version": "1.0.0",
-  "main": "server.js",
+  "description": "Deriv EMA indicator bot with Telegram alerts",
+  "main": "indicators.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node indicators.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "ws": "^8.16.0"
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
