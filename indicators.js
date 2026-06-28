@@ -162,6 +162,13 @@ function advanceEMA(symbol, period, closedClose) {
  * closed bar's EMA. It only advances when a bar actually closes.
  * This matches TradingView's and most charting libraries' behaviour.
  */
+function getLiveEMA(symbol, period, currentPrice) {
+  const stored = emaState[symbol][period];
+  if (stored === null) return null;
+  const k = 2 / (period + 1);
+  return currentPrice * k + stored * (1 - k);
+}
+
 function getEMA(symbol, period) {
   return emaState[symbol][period];
 }
@@ -271,22 +278,26 @@ function recalculateIndicators(symbol, timeframe, livePrice) {
 
   if (!historicalCandles || historicalCandles.length === 0 || !currentCandle) return;
 
-  // FIX Bug 1 — use stable closed-bar EMA, not a tick-by-tick live approximation
-  const ema20 = getEMA(symbol, 20);
-  const ema50 = getEMA(symbol, 50);
+  // Display: use closed-bar EMA (stable value for the forming candle)
+  const ema20Display = getEMA(symbol, 20);
+  const ema50Display = getEMA(symbol, 50);
 
-  const trend20  = ema20 !== null ? (livePrice > ema20 ? 'Uptrend'   : 'Downtrend') : 'N/A';
-  const trend50  = ema50 !== null ? (livePrice > ema50 ? 'Uptrend'   : 'Downtrend') : 'N/A';
-  const dist20   = ema20 !== null ? (livePrice - ema20).toFixed(4) : 'N/A';
-  const dist50   = ema50 !== null ? (livePrice - ema50).toFixed(4) : 'N/A';
+  // Detection: use live EMA (price-stepped) so crosses within the forming candle are caught
+  const ema20Live = getLiveEMA(symbol, 20, livePrice);
+  const ema50Live = getLiveEMA(symbol, 50, livePrice);
+
+  const trend20  = ema20Display !== null ? (livePrice > ema20Display ? 'Uptrend' : 'Downtrend') : 'N/A';
+  const trend50  = ema50Display !== null ? (livePrice > ema50Display ? 'Uptrend' : 'Downtrend') : 'N/A';
+  const dist20   = ema20Display !== null ? (livePrice - ema20Display).toFixed(4) : 'N/A';
+  const dist50   = ema50Display !== null ? (livePrice - ema50Display).toFixed(4) : 'N/A';
 
   process.stdout.write(
     `\r[${symbol}] Price: ${livePrice.toFixed(4)} | ` +
-    `EMA20: ${ema20 !== null ? ema20.toFixed(4) : 'N/A'} (${trend20} ${dist20}) | ` +
-    `EMA50: ${ema50 !== null ? ema50.toFixed(4) : 'N/A'} (${trend50} ${dist50})   `
+    `EMA20: ${ema20Display !== null ? ema20Display.toFixed(4) : 'N/A'} (${trend20} ${dist20}) | ` +
+    `EMA50: ${ema50Display !== null ? ema50Display.toFixed(4) : 'N/A'} (${trend50} ${dist50})   `
   );
 
-  checkEMATouches(symbol, timeframe, livePrice, ema20, ema50);
+  checkEMATouches(symbol, timeframe, livePrice, ema20Live, ema50Live);
 }
 
 // ─── Historical candle processing ─────────────────────────────────────────────
