@@ -176,10 +176,10 @@ function checkEMATouches(symbol, timeframe, currentPrice) {
     // Telegram message
     const message =
       `${period} EMA ${symbolName} ${arrow}\n\n` +
-      `EMA: ${ema.toFixed(4)} | Price: ${currentPrice.toFixed(4)}  [Alert ${alertTime}]`;
+      `EMA: ${ema.toFixed(4)} | Price: ${currentPrice.toFixed(4)}`;
 
     // Console log matches Telegram format
-    console.log(`\n${period} EMA ${symbolName} ${arrow}\nEMA: ${ema.toFixed(4)} | Price: ${currentPrice.toFixed(4)}  [Alert ${alertTime}]`);
+    console.log(`\n${period} EMA ${symbolName} ${arrow}\nEMA: ${ema.toFixed(4)} | Price: ${currentPrice.toFixed(4)}  [${alertTime}]`);
     sendTelegramNotification(message, dedupKey);
   });
 }
