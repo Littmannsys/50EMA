@@ -16,23 +16,24 @@ const TELEGRAM_CHAT_ID   = '6456659526';
 const API_URL = 'wss://ws.derivws.com/websockets/v3?app_id=1089';
 let ws;
 
+// ─── Indicator Configuration ──────────────────────────────────────────────────
+const EMA_PERIOD       = 20; // Set to 20 EMA
+const COOLDOWN_CANDLES = 5;  // Closed candles to wait before re-alerting
+
 // ─── Symbols & timeframes ─────────────────────────────────────────────────────
 const SYMBOLS    = ['R_10', 'R_25', 'R_50'];
-const TIMEFRAMES = ['5min'];
+const TIMEFRAMES = ['2min']; // Changed to 2min
 
-const timeframeMap = { '5min': 300 };
+const timeframeMap = { '2min': 120 }; // Changed to 120 seconds (2 minutes)
 
 const displayNames = {
   'R_10':   'Volatility 10 Index',
   'R_25':   'Volatility 25 Index',
   'R_50':   'Volatility 50 Index',
-  '5min':   '5 minutes'
+  '2min':   '2 minutes' // Updated display name
 };
 
 const MAX_HISTORICAL_CANDLES = 5000;
-
-// How many CLOSED candles must pass before the same EMA can alert again
-const COOLDOWN_CANDLES = 5;
 
 // ─── State ───────────────────────────────────────────────────────────────────
 const historicalData       = {};
@@ -52,12 +53,12 @@ function initState() {
       currentCandles[sym][tf]       = null;
       emaNotificationState[sym][tf] = {};
 
-      [20].forEach(period => {
+      [EMA_PERIOD].forEach(period => {
         emaNotificationState[sym][tf][period] = { lastNotifTimestamp: null, notifSent: false };
       });
     });
 
-    [20].forEach(period => {
+    [EMA_PERIOD].forEach(period => {
       emaState[sym][period] = null;
     });
   });
@@ -107,18 +108,14 @@ function advanceEMA(symbol, period, closedClose) {
   emaState[symbol][period] = closedClose * k + emaState[symbol][period] * (1 - k);
 }
 
-function getEMA(symbol, period) {
-  return emaState[symbol][period];
-}
-
 // ─── EMA cross detection ──────────────────────────────────────────────────────
 function checkEMATouches(symbol, timeframe, prevClose, currentPrice, currentTimestamp) {
   const symbolName  = displayNames[symbol] || symbol;
   const granularity = timeframeMap[timeframe];
 
-  [20].forEach(period => {
-    const ema = getEMA(symbol, period); 
-    if (ema === null) return;
+  [EMA_PERIOD].forEach(period => {
+    if (emaState[symbol][period] === null) return;
+    const ema = emaState[symbol][period]; 
 
     const k = 2 / (period + 1);
     const nextEma = currentPrice * k + ema * (1 - k); 
@@ -156,9 +153,9 @@ function checkEMATouches(symbol, timeframe, prevClose, currentPrice, currentTime
 
     const message =
       `${symbolName} ${arrow}\n` +
-      `EMA: ${nextEma.toFixed(4)} | Price: ${currentPrice.toFixed(4)}`;
+      `EMA ${EMA_PERIOD}: ${nextEma.toFixed(4)} | Price: ${currentPrice.toFixed(4)}`;
 
-    console.log(`\n${symbolName} ${arrow}\nEMA: ${nextEma.toFixed(4)} | Price: ${currentPrice.toFixed(4)}  [${alertTime}]`);
+    console.log(`\n${symbolName} ${arrow}\nEMA ${EMA_PERIOD}: ${nextEma.toFixed(4)} | Price: ${currentPrice.toFixed(4)}  [${alertTime}]`);
     sendTelegramNotification(message, dedupKey);
   });
 }
@@ -193,7 +190,7 @@ function updateCurrentCandle(symbol, price, timestamp) {
           checkEMATouches(symbol, timeframe, prevClose, closedClose, closedTimestamp);
         }
 
-        advanceEMA(symbol, 20, closedClose);
+        advanceEMA(symbol, EMA_PERIOD, closedClose);
         console.log(`\n[${symbol}/${timeframe}] Candle closed @ ${closedClose}`);
       }
 
@@ -213,11 +210,11 @@ function updateCurrentCandle(symbol, price, timestamp) {
 function recalculateIndicators(symbol, timeframe, livePrice) {
   if (!historicalData[symbol][timeframe].length || !currentCandles[symbol][timeframe]) return;
 
-  const ema20 = getEMA(symbol, 20);
+  const emaVal = emaState[symbol][EMA_PERIOD];
 
   process.stdout.write(
     `\r[${symbol}] Price:${livePrice.toFixed(4)} ` +
-    `EMA20:${ema20 !== null ? ema20.toFixed(4) : 'N/A'}   `
+    `EMA${EMA_PERIOD}:${emaVal !== null ? emaVal.toFixed(4) : 'N/A'}   `
   );
 }
 
@@ -240,11 +237,11 @@ function processCandles(symbol, timeframe, candles) {
     low: lastCandle.low,   close: lastCandle.close
   };
 
-  initEMA(symbol, historicalData[symbol][timeframe], 20);
+  initEMA(symbol, historicalData[symbol][timeframe], EMA_PERIOD);
 
   console.log(
     `[${symbol}/${timeframe}] Loaded ${data.length} candles | ` +
-    `EMA20:${emaState[symbol][20]?.toFixed(4) ?? 'N/A'}`
+    `EMA${EMA_PERIOD}:${emaState[symbol][EMA_PERIOD]?.toFixed(4) ?? 'N/A'}`
   );
 }
 
