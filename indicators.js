@@ -22,15 +22,15 @@ const COOLDOWN_CANDLES = 5;  // Closed candles to wait before re-alerting
 
 // ─── Symbols & timeframes ─────────────────────────────────────────────────────
 const SYMBOLS    = ['R_10', 'R_25', 'R_50'];
-const TIMEFRAMES = ['2min']; // Changed to 2min
+const TIMEFRAMES = ['5min'];
 
-const timeframeMap = { '2min': 120 }; // Changed to 120 seconds (2 minutes)
+const timeframeMap = { '5min': 300 };
 
 const displayNames = {
   'R_10':   'Volatility 10 Index',
   'R_25':   'Volatility 25 Index',
   'R_50':   'Volatility 50 Index',
-  '2min':   '2 minutes' // Updated display name
+  '5min':   '5 minutes'
 };
 
 const MAX_HISTORICAL_CANDLES = 5000;
@@ -108,14 +108,18 @@ function advanceEMA(symbol, period, closedClose) {
   emaState[symbol][period] = closedClose * k + emaState[symbol][period] * (1 - k);
 }
 
+function getEMA(symbol, period) {
+  return emaState[symbol][period];
+}
+
 // ─── EMA cross detection ──────────────────────────────────────────────────────
 function checkEMATouches(symbol, timeframe, prevClose, currentPrice, currentTimestamp) {
   const symbolName  = displayNames[symbol] || symbol;
   const granularity = timeframeMap[timeframe];
 
   [EMA_PERIOD].forEach(period => {
-    if (emaState[symbol][period] === null) return;
-    const ema = emaState[symbol][period]; 
+    const ema = getEMA(symbol, period); 
+    if (ema === null) return;
 
     const k = 2 / (period + 1);
     const nextEma = currentPrice * k + ema * (1 - k); 
@@ -210,7 +214,7 @@ function updateCurrentCandle(symbol, price, timestamp) {
 function recalculateIndicators(symbol, timeframe, livePrice) {
   if (!historicalData[symbol][timeframe].length || !currentCandles[symbol][timeframe]) return;
 
-  const emaVal = emaState[symbol][EMA_PERIOD];
+  const emaVal = getEMA(symbol, EMA_PERIOD);
 
   process.stdout.write(
     `\r[${symbol}] Price:${livePrice.toFixed(4)} ` +
