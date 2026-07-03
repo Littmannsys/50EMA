@@ -35,8 +35,6 @@ const MAX_HISTORICAL_CANDLES = 5000;
 const COOLDOWN_CANDLES = 5;
 
 // Hard minimum seconds between any two Telegram sends for the same key
-// Set to 4 minutes (240s) — well under a 5-min candle so real crosses aren't missed
-// but long enough to absorb any duplicate ticks or reconnect floods
 const MIN_ALERT_SECONDS = 240;
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -44,8 +42,7 @@ const historicalData       = {};
 const currentCandles       = {};
 const candleCount          = {};
 const emaNotificationState = {};
-const emaPriceSide         = {};
-const emaState             = {};
+const emaState             = {}; // Persistent EMA line values
 
 function initState() {
   SYMBOLS.forEach(sym => {
@@ -53,7 +50,6 @@ function initState() {
     currentCandles[sym]       = {};
     candleCount[sym]          = {};
     emaNotificationState[sym] = {};
-    emaPriceSide[sym]         = {};
     emaState[sym]             = {};
 
     TIMEFRAMES.forEach(tf => {
@@ -61,11 +57,9 @@ function initState() {
       currentCandles[sym][tf]       = null;
       candleCount[sym][tf]          = 0;
       emaNotificationState[sym][tf] = {};
-      emaPriceSide[sym][tf]         = {};
 
       [20].forEach(period => {
         emaNotificationState[sym][tf][period] = { lastNotifCandle: null, notifSent: false };
-        emaPriceSide[sym][tf][period]         = null;
       });
     });
 
@@ -78,8 +72,6 @@ function initState() {
 initState();
 
 // ─── Telegram ────────────────────────────────────────────────────────────────
-// Single source of truth for dedup — keyed on symbol:timeframe:period
-// Set synchronously before the async fetch so no second tick can slip through
 const alertSentAt = new Map();
 
 async function sendTelegramNotification(message, dedupKey) {
@@ -128,25 +120,32 @@ function getEMA(symbol, period) {
 }
 
 // ─── EMA cross detection ──────────────────────────────────────────────────────
-function checkEMATouches(symbol, timeframe, currentPrice) {
+function checkEMATouches(symbol, timeframe, prevClose, currentPrice) {
   const symbolName    = displayNames[symbol]    || symbol;
-  const timeframeName = displayNames[timeframe] || timeframe;
   const currentCount  = candleCount[symbol][timeframe];
   const now           = Date.now();
 
   [20].forEach(period => {
-    const ema = getEMA(symbol, period);
+    const ema = getEMA(symbol, period); // Current active EMA value before advance
     if (ema === null) return;
 
-    const state      = emaNotificationState[symbol][timeframe][period];
+    const k = 2 / (period + 1);
+    const nextEma = currentPrice * k + ema * (1 - k); // Expected EMA at candle completion
+
+    // Stateless verification: Check if closes cross their respective EMAs
+    const previouslyAbove = prevClose >= ema;
+    const currentlyAbove  = currentPrice >= nextEma;
+
+    // If both are true or both are false, no true line crossing occurred
+    if (previouslyAbove === currentlyAbove) return;
+
     const dedupKey   = `${symbol}:${timeframe}:${period}`;
     const lastSentMs = alertSentAt.get(dedupKey) || 0;
+    const state      = emaNotificationState[symbol][timeframe][period];
 
-    // ── Cooldown unlock: BOTH conditions must pass ───────────────────────────
-    // 1. Enough candles have closed since last alert
+    // ── Cooldown updates ─────────────────────────────────────────────────────
     const candlesClear = state.lastNotifCandle === null ||
                          (currentCount - state.lastNotifCandle) >= COOLDOWN_CANDLES;
-    // 2. Enough real time has passed (hard backstop against any duplicate source)
     const timeClear    = (now - lastSentMs) >= (MIN_ALERT_SECONDS * 1000);
 
     if (state.notifSent && candlesClear && timeClear) {
@@ -156,30 +155,20 @@ function checkEMATouches(symbol, timeframe, currentPrice) {
 
     if (state.notifSent) return;
 
-    const currentSide  = currentPrice >= ema ? 'above' : 'below';
-    const previousSide = emaPriceSide[symbol][timeframe][period];
-
-    emaPriceSide[symbol][timeframe][period] = currentSide;
-
-    if (previousSide === null) return;
-    if (previousSide === currentSide) return;
-
-    // ── Genuine cross — lock FIRST, then send ───────────────────────────────
+    // ── Genuine cross verified ───────────────────────────────────────────────
     state.lastNotifCandle = currentCount;
     state.notifSent       = true;
-    alertSentAt.set(dedupKey, now);   // set synchronously before async send
+    alertSentAt.set(dedupKey, now);
 
-    const crossedUp = currentSide === 'above';
+    const crossedUp = currentlyAbove;
     const arrow     = crossedUp ? '⬆️' : '⬇️';
     const alertTime = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-    // Telegram message
     const message =
       `${symbolName} ${arrow}\n` +
-      `EMA: ${ema.toFixed(4)} | Price: ${currentPrice.toFixed(4)}`;
+      `EMA: ${nextEma.toFixed(4)} | Price: ${currentPrice.toFixed(4)}`;
 
-    // Console log matches Telegram format
-    console.log(`\n${symbolName} ${arrow}\nEMA: ${ema.toFixed(4)} | Price: ${currentPrice.toFixed(4)}  [${alertTime}]`);
+    console.log(`\n${symbolName} ${arrow}\nEMA: ${nextEma.toFixed(4)} | Price: ${currentPrice.toFixed(4)}  [${alertTime}]`);
     sendTelegramNotification(message, dedupKey);
   });
 }
@@ -202,10 +191,16 @@ function updateCurrentCandle(symbol, price, timestamp) {
         if (historicalData[symbol][timeframe].length > MAX_HISTORICAL_CANDLES)
           historicalData[symbol][timeframe].shift();
 
+        const hData = historicalData[symbol][timeframe];
+        const len = hData.length;
         const closedClose = currentCandles[symbol][timeframe].close;
-        // Check cross BEFORE advancing EMA — price must be compared against
-        // the EMA that was active DURING the candle, not the next bar's EMA
-        checkEMATouches(symbol, timeframe, closedClose);
+
+        // Ensure we have at least 2 elements to compare past vs present closed states
+        if (len >= 2) {
+          const prevClose = hData[len - 2].close;
+          checkEMATouches(symbol, timeframe, prevClose, closedClose);
+        }
+
         advanceEMA(symbol, 20, closedClose);
         candleCount[symbol][timeframe]++;
         console.log(`\n[${symbol}/${timeframe}] Candle #${candleCount[symbol][timeframe]} closed @ ${closedClose}`);
@@ -233,8 +228,6 @@ function recalculateIndicators(symbol, timeframe, livePrice) {
     `\r[${symbol}] Price:${livePrice.toFixed(4)} ` +
     `EMA20:${ema20 !== null ? ema20.toFixed(4) : 'N/A'}   `
   );
-
-  // Cross detection moved to candle close — no tick-by-tick false signals
 }
 
 // ─── Historical candle processing ────────────────────────────────────────────
@@ -257,16 +250,6 @@ function processCandles(symbol, timeframe, candles) {
   };
 
   initEMA(symbol, historicalData[symbol][timeframe], 20);
-
-  // Seed emaPriceSide from the last CLOSED candle's close so the first
-  // live tick never sees a null→side transition and fires a false cross
-  [20].forEach(period => {
-    const ema      = emaState[symbol][period];
-    const closed   = historicalData[symbol][timeframe];
-    const lastClose = closed.length ? closed[closed.length - 1].close : null;
-    emaPriceSide[symbol][timeframe][period] =
-      (ema !== null && lastClose !== null) ? (lastClose >= ema ? 'above' : 'below') : null;
-  });
 
   console.log(
     `[${symbol}/${timeframe}] Loaded ${data.length} candles | ` +
@@ -291,7 +274,6 @@ function subscribeToTicks(symbol) {
   sendMessage({ ticks: symbol, subscribe: 1 });
 }
 
-// Track last processed epoch per symbol to drop exact duplicates
 const lastTickEpoch = {};
 
 function handleMessage(raw) {
@@ -310,7 +292,6 @@ function handleMessage(raw) {
     const { symbol, quote, epoch } = data.tick;
     const price = parseFloat(quote);
 
-    // Drop if same epoch as the last tick we processed for this symbol
     if (lastTickEpoch[symbol] === epoch) return;
     lastTickEpoch[symbol] = epoch;
 
