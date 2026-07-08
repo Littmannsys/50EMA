@@ -17,13 +17,13 @@ const API_URL = 'wss://ws.derivws.com/websockets/v3?app_id=1089';
 let ws;
 
 // ─── Indicator Configuration ──────────────────────────────────────────────────
-const EMA_PERIODS      = [17, 47]; // Tracks both 17 and 47 EMA
+const EMA_PERIODS      = [17, 57]; // Tracks both 17 and 57 EMA
 const COOLDOWN_CANDLES = 5;        // Closed candles to wait before re-alerting
 
 // Emoji mapping to identify the EMA period
 const EMA_EMOJIS = {
   17: '🤤',
-  47: '🫪'
+  57: '🫪'
 };
 
 // ─── Symbols & timeframes ─────────────────────────────────────────────────────
