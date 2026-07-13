@@ -27,14 +27,14 @@ const EMA_EMOJIS = {
 };
 
 // ─── Symbols & timeframes ─────────────────────────────────────────────────────
-const SYMBOLS    = ['1HZ10V', '1HZ25V']; 
+const SYMBOLS    = ['R_10', 'R_25']; 
 const TIMEFRAMES = ['5min'];
 
 const timeframeMap = { '5min': 300 }; // 5 mins = 300 seconds
 
 const displayNames = {
-  '1HZ10V':  'Volatility 10 (1s) Index',
-  '1HZ25V':  'Volatility 25 (1s) Index',
+  'R_10':    'Volatility 10 Index',
+  'R_25':    'Volatility 25 Index',
   '5min':    '5 minutes'
 };
 
