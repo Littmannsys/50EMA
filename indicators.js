@@ -13,13 +13,9 @@ const TELEGRAM_BOT_TOKEN = '8626868477:AAHyD9ajC4M_SYX4XbYcbAiV9nmtelVl6KA';
 const TELEGRAM_CHAT_ID   = '6456659526';
 
 // ─── Deriv WebSocket ──────────────────────────────────────────────────────────
-// NOTE: This points at wss://api.derivws.com/trading/v1/options/ws/public.
-// That endpoint's own docs describe auth via a `Deriv-App-ID` HTTP header
-// (not an app_id query param) and don't document ticks_history/candles —
-// it's documented specifically for Options contracts. Keeping app_id as a
-// query param here as a best-effort guess; if the server rejects/ignores it,
-// see the diagnostic logging below.
-const APP_ID  = '1089';
+// NOTE: This is the public endpoint for Deriv's Options Trading API, not the
+// classic API this script's ticks_history/candles/ticks messages target.
+// If candles/ticks stop coming through, that's likely why.
 const API_URL = 'wss://api.derivws.com/trading/v1/options/ws/public';
 let ws;
 
@@ -319,36 +315,23 @@ function handleMessage(raw) {
   }
 }
 
-let firstMessageLogged = false;
-
 function initializeWebSocket() {
-  console.log(`[WS] Connecting to ${API_URL} …`);
-  ws = new WebSocket(API_URL, { headers: { 'Deriv-App-ID': APP_ID } });
+  console.log('[WS] Connecting…');
+  ws = new WebSocket(API_URL);
 
   ws.on('open', () => {
-    console.log('[WS] Connected (handshake succeeded)');
-    firstMessageLogged = false;
+    console.log('[WS] Connected');
     SYMBOLS.forEach(sym => {
       TIMEFRAMES.forEach(tf => requestCandles(sym, tf));
       subscribeToTicks(sym);
     });
   });
 
-  ws.on('message', raw => {
-    if (!firstMessageLogged) {
-      firstMessageLogged = true;
-      console.log('[WS][DIAGNOSTIC] First raw message from server:', raw.toString().slice(0, 500));
-    }
-    handleMessage(raw);
-  });
+  ws.on('message', handleMessage);
 
-  ws.on('close', (code, reason) => {
-    console.log(`\n[WS] Disconnected (code=${code}, reason=${reason || 'none'}) — reconnecting in 5s…`);
+  ws.on('close', () => {
+    console.log('\n[WS] Disconnected — reconnecting in 5s…');
     setTimeout(initializeWebSocket, 5_000);
-  });
-
-  ws.on('unexpected-response', (req, res) => {
-    console.error(`[WS][DIAGNOSTIC] Unexpected HTTP response during handshake: ${res.statusCode} ${res.statusMessage}`);
   });
 
   ws.on('error', err => console.error('[WS] Error:', err.message));
